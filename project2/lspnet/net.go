@@ -76,6 +76,8 @@ func DialUDP(ntwk string, laddr, raddr *UDPAddr) (*UDPConn, error) {
 }
 
 // JoinHostPort behaves the same as the net.JoinHostPort function.
+//	JoinHostPort combines host and port into a network address of the form "host:port" or,
+//	if host contains a colon or a percent sign, "[host]:port".
 func JoinHostPort(host, port string) string {
 	return net.JoinHostPort(host, port)
 }

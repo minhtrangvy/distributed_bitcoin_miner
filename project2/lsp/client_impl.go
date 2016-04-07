@@ -14,16 +14,14 @@ type client struct {
 	conn			*lspnet.UDPConn
 	connAddr		*lspnet.UDPAddr
 
-	oldestAckInWindow	int
-	oldestUnAckData		int
-	seqNumToSend		int
-							// next one to the next msg we send
-	expectedSN		int		// the next expected SN
+	seqNumToSend	int
+	expectedSN		int		// the next SN we expect to receive
 
 	connectChan		(chan Message)
 
 	epochCh			(chan int)
 	numEpochs 		int
+	lastEpoch		int
 	epochLimit 		int
 	epochMillis 	int
 
@@ -32,11 +30,12 @@ type client struct {
 	dataWindow 		map[int]Message
 
 	intermediateToRead (chan Message)
+	intermediateToSend (chan Message)
 	toRead			(chan Message)
 	toWrite			(chan Message)
 
-	lostConn		(chan int)
-	closed 			(chan int)
+	lostConn		bool
+	closed 			bool
 }
 
 // NewClient creates, initiates, and returns a new client. This function
@@ -58,28 +57,28 @@ func NewClient(hostport string, params *Params) (Client, error) {
 	conn, dial_err = DialUDP("udp", nil, hostport)
 
 	current_client := client	{
-		connID:         0,
-		conn:			conn,
-		connectChan:	make(chan *Message,1),
-
-		seqNumToSend:	0,			// next Sn to send
-		expectedSN:		0,
-
-		epochCh: 		make(chan int, 1),
-		numEpochs: 		0,
-		epochLimit: 	params.EpochLimit,
-		epochMillis:	params.EpochMillis,
-
-		windowSize: 	params.WindowSize,
-		ackWindow:		make(map[int]Message),
-		dataWindow:		make(map[int]Message),
-
-		intermediateToRead: make(chan *Message, 1),
-		toRead:			make(chan *Message, 1),
-		toWrite:		make(chan *Message, 1),
-
-		lostConn:		make(chan int, 1),
-		closed:			make(chan int, 1),
+		// connID:         0,
+		// conn:			conn,
+		// connectChan:	make(chan *Message,1),
+		//
+		// seqNumToSend:	0,			// next Sn to send
+		// expectedSN:		0,
+		//
+		// epochCh: 		make(chan int, 1),
+		// numEpochs: 		0,
+		// epochLimit: 	params.EpochLimit,
+		// epochMillis:	params.EpochMillis,
+		//
+		// windowSize: 	params.WindowSize,
+		// ackWindow:		make(map[int]Message),
+		// dataWindow:		make(map[int]Message),
+		//
+		// intermediateToRead: make(chan *Message, 1),
+		// toRead:			make(chan *Message, 1),
+		// toWrite:		make(chan *Message, 1),
+		//
+		// lostConn:		make(chan int, 1),
+		// closed:			make(chan int, 1),
 	}
 
 	// for index,_ := range current_client.dataWindow {
@@ -105,7 +104,7 @@ func NewClient(hostport string, params *Params) (Client, error) {
 }
 
 func (c *client) ConnID() int {
-	return c.id
+	return c.connID
 }
 
 func (c *client) Read() ([]byte, error) {
@@ -118,30 +117,53 @@ func (c *client) Read() ([]byte, error) {
 }
 
 func (c *client) Write(payload []byte) error {
+	dataMessage := NewData(c.connID, c.seqNumToSend, payload)
+	// if len(c.dataWindow) < c.windowSize {
+	// 	c.toWrite <- dataMessage
+	// } else {
+
+	if !c.closed {
+		c.intermediateToSend <- dataMessage
+	}
+	// Create a data messages
+	// Cannot send unless dataWindow < windowSize
+		// If it is, put msg into intermediateToSend
+				//helper:// Else Send it
+						// Add it it to our window
 	return errors.New("not yet implemented")
 }
 
 func (c *client) Close() error {
-	return errors.New("not yet implemented")
+	c.closed = true
+	c.intermediateToRead <- nil
+	return errors.New("Closing client")
 }
 
-// ===================== HANDLING FUNCTIONS ================================
+// ===================== GO FUNCTIONS ================================
 
-func goClient(c *client) {
+func (c *client) goClient() {
 	epochCh = time.NewTicker(c.epochMillis).C
-	for {
+	for !(c.closed){
 		select {
-		case <- epochCh:
-			c.epoch(c)
-		// if at any time there is a read message to process
-		case msg <- intermediateToRead:
-			c.readHelper(msg)
+		case <- c.epochCh:
+			c.epoch()
+		case msg <- c.intermediateToRead:
+			if msg == nil {
+				c.lostConn = true
+				c.toRead <- nil
+			} else {
+				c.readHelper(msg)
+			}
+		case ((len(c.dataWindow) < c.windowSize) && (msg <- c.intermediateToSend)):
+			c.writeHelper(msg)
 		}
 	}
+
+	c.conn.close()
 }
 
 // always reading from the connection
-func goRead(c *client) {
+func (c *client) goRead(){
 	for {
 		select {
 		case <- c.lostConn:
@@ -155,6 +177,13 @@ func goRead(c *client) {
 	}
 }
 
+// ===================== HELPER FUNCTIONS ================================
+
+func (c *client) writeHelper(msg Message) {
+	c.sendToServer(msg)
+	c.dataWindow[msg.SeqNum] = msg
+}
+
 func (c *client) readHelper(msg Message) {
 	select {
 	// If we receive a data message, send an ack back
@@ -164,6 +193,7 @@ func (c *client) readHelper(msg Message) {
 		if c.connID > 0 {
 			maxAcceptableSN := c.expectedSN + c.windowSize
 			// If not a duplicate, insert into toRead channel for Read to work with
+			// Does it have to be within our window?
 			if (msg.SeqNum >= c.expectedSN) && (msg.SeqNum <= maxAcceptableSN) {
 				if msg.SeqNum == c.expectedSN {
 					c.expectedSN++
@@ -189,42 +219,35 @@ func (c *client) readHelper(msg Message) {
 			c.seqNumToSend = 1
 			c.expectedSN = 1
 		} else {
-		// If this is an ack for a data message
-			// If this ack is for a message in our window of unacked data, delete the msg from the unacked data msgs window and shift everything over
-			if msg.SeqNum == c.oldestUnAckData {
-				c.oldestUnAckData = msg.SeqNum
-			}
-			c.moveDataWindow(msg)
-		}
-
-		// Move our data window
-	default:
-	}
-}
-
-func (c *client) moveDataWindow(msg Message) {
-	// Delete the data msg that was acked from the dataWindow
-	for index,curr_msg := c.dataWindow {
-		if curr_msg.SeqNum == msg.SeqNum {
-			c.dataWindow[index].occupiedSlot = 0
-			c.dataWindow[index].message = nil
+			c.deleteFromDataWindow(msg)
 		}
 	}
-	// Shift everything over
-	i := 0
-	for (i < 4) {
+}
 
-		i++
+func (c *client) epoch() {
+	c.numEpochs++
+	// If no connection, resent connection request
+	if c.connID == 0 {
+		if (c.numEpochs - c.lastEpoch) > c.epochLimit {
+			c.lostConn <- 1 		// connection lost
+			c.Close()
+		} else {
+			c.connectionRequest()
+		}
+	} else {
+		if c.expectedSN == 1 {
+			remindAck := NewAck(c.connID, 0)
+		}
+		for sn, message := range c.dataWindow {
+			c.sendToServer(message)
+		}
+		for sn, ack := range c.ackWindow {
+			c.sendToServer(ack)
+		}
 	}
 }
 
-func epoch(msg Message) {
-	// actually do everything that's supposed to happen during the epoch
-}
-
-// ===================== HELPER FUNCTIONS ================================
-
-func connectionRequest() (c *client) {
+func (c *client) connectionRequest() {
 	connectMsg := NewConnect()
 	connectMsg.ConnID = 0
 	connectMsg.SeqNum = 0
@@ -242,6 +265,7 @@ func (c *client) sendToServer(msg Message) {
 func (c *client) readFromServer() (buffer []byte) {
 	buff := make([]byte, 1500)		// since packets should be <= 1500
 	num_bytes, received_addr, received_err := c.conn.lspnet.ReadFromUDP(buff[0:])
+	c.lastEpoch = c.numEpochs
 	PrintError(received_err)
 	received_msg := Message{}
 	json.Unmarshal(buff[0:num_bytes], &received_msg)
@@ -249,22 +273,32 @@ func (c *client) readFromServer() (buffer []byte) {
 }
 
 func (c *client) moveAckWindow(msg Message) {
-	// We just sent an ack, so we have to update the most recently sent Acks
-	numMsgs := len(c.ackWindow)
-	index := 0
-	for index, _ := range c.ackWindow {
-		// If we are not yet at the last one and the next one is actual data, move it
-		if (index < 4) && (c.ackWindow[index].occupiedSlot == 1){
-			c.ackWindow[index] = c.ackWindow[index+1]
-		// Else we hit the last index or an unused slot, insert the curent msg there
-		} else {
-			current_ackStruct := {
-									occupiedSlot: 1,
-									message: msg,
-								}
-			c.ackWindow[index] = current_ackStruct
-		}
+	numAcksInWindow := len(c.ackWindow)
+	// If the window is full, delete the oldest acknowledgement sent
+	if numAcksInWindow == c.windowSize {
+		lowestSN := findLowestSNinMap("ack")
+		delete(c.ackWindow[lowestSN])
 	}
+	c.ackWindow[msg.SeqNum] = msg
+}
+
+
+func (c *client) deleteFromDataWindow(msg Message) {
+	// Delete the data msg that was acked from the dataWindow
+	delete(c.dataWindow[msg.SeqNum]
+}
+
+func (c *client) findLowestSNinMap(whichMap string) int {
+	lowestSN := Inf(0)
+	if whichMap == "ack" {
+		currentMap := c.ackWindow
+	} else {
+		currentMap := c.dataWindow
+	}
+	for sn, curr_msg := range currentMap {
+		lowestSN = min(lowestSN,sn)
+	}
+	return lowestSN
 }
 
 func PrintError(err error, line int) {

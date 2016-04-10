@@ -9,8 +9,8 @@ import (
 	"log"
 	"strconv"
 
-	"github.com/jnylam/cs189a/project2/lsp"
-	"github.com/jnylam/cs189a/project2/lspnet"
+	"github.com/minhtrangvy/distributed_bitcoin_miner/project2/lsp"
+	"github.com/minhtrangvy/distributed_bitcoin_miner/project2/lspnet"
 )
 
 var (

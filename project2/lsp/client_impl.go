@@ -5,9 +5,10 @@ package lsp
 import "errors"
 import "encoding/json"
 import "fmt"
-import "os"
+// import "os"
 import "time"
-import "reflect"
+import "github.com/minhtrangvy/distributed_bitcoin_miner/project2/lspnet"
+// import "reflect"
 
 type client struct {
 	connID			int
@@ -17,9 +18,9 @@ type client struct {
 	seqNumToSend	int
 	expectedSN		int		// the next SN we expect to receive
 
-	connectChan		(chan Message)
+	connectChan		(chan *Message)
 
-	epochCh			(chan int)
+	epochCh			(<-chan time.Time)
 	numEpochs 		int
 	lastEpoch		int
 	epochLimit 		int
@@ -29,13 +30,13 @@ type client struct {
 	ackWindow		map[int]Message
 	dataWindow 		map[int]Message
 
-	intermediateToRead (chan Message)
-	intermediateToSend (chan Message)
-	toRead			(chan Message)
-	toWrite			(chan Message)
+	intermediateToRead (chan *Message)
+	intermediateToSend (chan *Message)
+	toRead			(chan *Message)
+	toWrite			(chan *Message)
 
-	lostConn		bool
-	closed 			bool
+	closed			bool
+	finished		bool
 }
 
 // NewClient creates, initiates, and returns a new client. This function
@@ -50,56 +51,58 @@ type client struct {
 // and port number (i.e., "localhost:9999").
 func NewClient(hostport string, params *Params) (Client, error) {
 	// host, port, split_err = SplitHostPort(hostport)
-	serverAddr, resolve_err := net.ResolveUDPAddr("udp", hostport)
+	serverAddr, resolve_err := lspnet.ResolveUDPAddr("udp", hostport)
 	PrintError(resolve_err, 28)
 
 	// Send connect message to server
-	conn, dial_err = DialUDP("udp", nil, hostport)
+	connection, dial_err := lspnet.DialUDP("udp", nil, serverAddr)
+	PrintError(dial_err, 59)
 
 	current_client := client	{
-		// connID:         0,
-		// conn:			conn,
-		// connectChan:	make(chan *Message,1),
-		//
-		// seqNumToSend:	0,			// next Sn to send
-		// expectedSN:		0,
-		//
-		// epochCh: 		make(chan int, 1),
-		// numEpochs: 		0,
-		// epochLimit: 	params.EpochLimit,
-		// epochMillis:	params.EpochMillis,
-		//
-		// windowSize: 	params.WindowSize,
-		// ackWindow:		make(map[int]Message),
-		// dataWindow:		make(map[int]Message),
-		//
-		// intermediateToRead: make(chan *Message, 1),
-		// toRead:			make(chan *Message, 1),
-		// toWrite:		make(chan *Message, 1),
-		//
-		// lostConn:		make(chan int, 1),
-		// closed:			make(chan int, 1),
+		connID:			0,
+		conn:			connection,
+		seqNumToSend:	0,
+		expectedSN:		0,		// the next SN we expect to receive
+
+		connectChan:	make(chan *Message, 1),
+
+		numEpochs: 		0,
+		lastEpoch:		0,
+		epochLimit: 	params.EpochLimit,
+		epochMillis: 	params.EpochMillis,
+
+		windowSize: 	params.WindowSize,
+		ackWindow:		make(map[int]Message),
+		dataWindow: 	make(map[int]Message),
+
+		intermediateToRead: make(chan *Message),
+		intermediateToSend: make(chan *Message),
+		toRead:			make(chan *Message),
+		toWrite:		make(chan *Message),
+
+		closed:			false,
+		finished: 		false,
 	}
 
 	// for index,_ := range current_client.dataWindow {
 	// 	current_client[index].occupiedSlot = 0
 	// }
 
-	go goClient(&current_client)
-	go goRead(&current_client)
+	go current_client.goClient()
+	go current_client.goRead()
 
 	// Send connection request to server
-	connectionRequest(conn)
+	current_client.connectionRequest()
 
 	// Block until we get a connection ack back
-	connectAck := <- connectChan
-
+	connectAck := <- current_client.connectChan
+	curr_client := &current_client
 	// Then return the appropriate client
 	if connectAck == nil {
 		return nil, errors.New("Could not connect!")
 	} else {
 		current_client.connID = connectAck.ConnID
-		return current_client, nil
+		return curr_client, nil
 	}
 }
 
@@ -118,61 +121,66 @@ func (c *client) Read() ([]byte, error) {
 
 func (c *client) Write(payload []byte) error {
 	dataMessage := NewData(c.connID, c.seqNumToSend, payload)
-	// if len(c.dataWindow) < c.windowSize {
-	// 	c.toWrite <- dataMessage
-	// } else {
 
 	if !c.closed {
 		c.intermediateToSend <- dataMessage
 	}
-	// Create a data messages
-	// Cannot send unless dataWindow < windowSize
-		// If it is, put msg into intermediateToSend
-				//helper:// Else Send it
-						// Add it it to our window
-	return errors.New("not yet implemented")
+	return nil
 }
 
 func (c *client) Close() error {
 	c.closed = true
 	c.intermediateToRead <- nil
+	c.toRead <- nil
 	return errors.New("Closing client")
 }
 
 // ===================== GO FUNCTIONS ================================
 
 func (c *client) goClient() {
-	epochCh = time.NewTicker(c.epochMillis).C
-	for !(c.closed){
+	c.epochCh = time.NewTicker(time.Duration(c.epochMillis)*time.Millisecond).C
+	for !(c.closed && c.finished) {
 		select {
 		case <- c.epochCh:
 			c.epoch()
-		case msg <- c.intermediateToRead:
+		case msg := <- c.intermediateToRead:
 			if msg == nil {
-				c.lostConn = true
+				c.finished = true
 				c.toRead <- nil
 			} else {
-				c.readHelper(msg)
+				c.readHelper(*msg)
 			}
-		case ((len(c.dataWindow) < c.windowSize) && (msg <- c.intermediateToSend)):
-			c.writeHelper(msg)
+		case msg := <- c.intermediateToSend:
+			sent := false
+			for !sent {
+				if len(c.dataWindow) < c.windowSize {
+					c.writeHelper(*msg)
+					sent = true;
+				}
+			}
 		}
 	}
-
-	c.conn.close()
+	fmt.Println("closing connection")
+	c.conn.Close()
 }
 
 // always reading from the connection
 func (c *client) goRead(){
 	for {
-		select {
-		case <- c.lostConn:
+		if !(c.closed || c.finished) {
+			// received_msg := c.readFromServer()
+			buff := make([]byte, 1500)		// since packets should be <= 1500
+			num_bytes, _, received_err := c.conn.ReadFromUDP(buff[0:])
+			PrintError(received_err,270)
+
+			c.lastEpoch = c.numEpochs
+
+			received_msg := Message{}
+			unmarshall_err := json.Unmarshal(buff[0:num_bytes], &received_msg)
+			PrintError(unmarshall_err,273)
+			c.intermediateToRead <- &received_msg
+		} else {
 			return
-		case <- c.closed:
-			return
-		default:
-			received_msg := c.readFromServer()
-			c.intermediateToRead <- msg
 		}
 	}
 }
@@ -185,10 +193,10 @@ func (c *client) writeHelper(msg Message) {
 }
 
 func (c *client) readHelper(msg Message) {
-	select {
+	switch msg.Type {
 	// If we receive a data message, send an ack back
 		// Make sure to add it to the ackWindow so we can resend acks during epoch
-	case msg.Type == MsgData:
+	case MsgData:
 		// Make sure there is a connection
 		if c.connID > 0 {
 			maxAcceptableSN := c.expectedSN + c.windowSize
@@ -198,23 +206,22 @@ func (c *client) readHelper(msg Message) {
 				if msg.SeqNum == c.expectedSN {
 					c.expectedSN++
 				}
-				c.toRead <- msg
+				c.toRead <- &msg
 
 				// Send back an ack for the message
-				ackMsg := NewAck()
-				ackMsg.ConnID = c.connID
-				ackMsg.SeqNum = msg.SeqNum
-				c.sendToServer(ackMsg)
-				c.moveAckWindow(ackMsg)
+				ackMsg := NewAck(c.connID,msg.SeqNum)
+				c.sendToServer(*ackMsg)
+				c.moveAckWindow(*ackMsg)
 			}
 		} else {
 			return
 		}
 	// If we receive an ack, indicate that the connection has been made if not already
 		// If ack sn > 0, make sure that the data msg w/ the same sn leaves the unacked data window (if it was the oldest sn in the window, shift the window, update next expected SN)
-	case msg.Type == MsgAck:
+	case MsgAck:
 		// If this is an ack for the connection request
 		if c.connID == 0 {
+			c.connectChan <- &msg
 			c.connID = msg.ConnID
 			c.seqNumToSend = 1
 			c.expectedSN = 1
@@ -229,7 +236,8 @@ func (c *client) epoch() {
 	// If no connection, resent connection request
 	if c.connID == 0 {
 		if (c.numEpochs - c.lastEpoch) > c.epochLimit {
-			c.lostConn <- 1 		// connection lost
+			// lost connection, so close
+			c.connectChan <- nil
 			c.Close()
 		} else {
 			c.connectionRequest()
@@ -237,11 +245,12 @@ func (c *client) epoch() {
 	} else {
 		if c.expectedSN == 1 {
 			remindAck := NewAck(c.connID, 0)
+			c.sendToServer(*remindAck)
 		}
-		for sn, message := range c.dataWindow {
+		for _, message := range c.dataWindow {
 			c.sendToServer(message)
 		}
-		for sn, ack := range c.ackWindow {
+		for _, ack := range c.ackWindow {
 			c.sendToServer(ack)
 		}
 	}
@@ -251,33 +260,35 @@ func (c *client) connectionRequest() {
 	connectMsg := NewConnect()
 	connectMsg.ConnID = 0
 	connectMsg.SeqNum = 0
-	bytes_written = c.sendToServer(connectMsg)
+	c.sendToServer(*connectMsg)
 }
 
 func (c *client) sendToServer(msg Message) {
 	m_msg, marshal_err := json.Marshal(msg) // Marshalled connect message
 	PrintError(marshal_err, 109)
-	bytes_written, write_msg_err := conn.Write(m_msg)
+	_, write_msg_err := c.conn.Write(m_msg)
 	PrintError(write_msg_err, 111)
-	return bytes_written
 }
 
-func (c *client) readFromServer() (buffer []byte) {
-	buff := make([]byte, 1500)		// since packets should be <= 1500
-	num_bytes, received_addr, received_err := c.conn.lspnet.ReadFromUDP(buff[0:])
-	c.lastEpoch = c.numEpochs
-	PrintError(received_err)
-	received_msg := Message{}
-	json.Unmarshal(buff[0:num_bytes], &received_msg)
-	return received_msg
-}
+// func (c *client) readFromServer() (buffer []byte) {
+// 	buff := make([]byte, 1500)		// since packets should be <= 1500
+// 	num_bytes, _, received_err := c.conn.ReadFromUDP(buff[0:])
+// 	PrintError(received_err,270)
+//
+// 	c.lastEpoch = c.numEpochs
+//
+// 	received_msg := Message{}
+// 	unmarshall_err := json.Unmarshal(buff[0:num_bytes], &received_msg)
+// 	PrintError(unmarshall_err,273)
+// 	return &received_msg
+// }
 
 func (c *client) moveAckWindow(msg Message) {
 	numAcksInWindow := len(c.ackWindow)
 	// If the window is full, delete the oldest acknowledgement sent
 	if numAcksInWindow == c.windowSize {
-		lowestSN := findLowestSNinMap("ack")
-		delete(c.ackWindow[lowestSN])
+		lowestSN := c.findLowestSNinMap("ack")
+		delete(c.ackWindow, lowestSN)
 	}
 	c.ackWindow[msg.SeqNum] = msg
 }
@@ -285,18 +296,21 @@ func (c *client) moveAckWindow(msg Message) {
 
 func (c *client) deleteFromDataWindow(msg Message) {
 	// Delete the data msg that was acked from the dataWindow
-	delete(c.dataWindow[msg.SeqNum]
+	delete(c.dataWindow, msg.SeqNum)
 }
 
 func (c *client) findLowestSNinMap(whichMap string) int {
-	lowestSN := Inf(0)
+	lowestSN :=  int(^uint(0) >> 1)
+	currentMap := c.ackWindow
 	if whichMap == "ack" {
-		currentMap := c.ackWindow
+		currentMap = c.ackWindow
 	} else {
-		currentMap := c.dataWindow
+		currentMap = c.dataWindow
 	}
-	for sn, curr_msg := range currentMap {
-		lowestSN = min(lowestSN,sn)
+	for sn, _ := range currentMap {
+		if sn < lowestSN {
+			lowestSN = sn
+		}
 	}
 	return lowestSN
 }
@@ -309,8 +323,8 @@ func PrintError(err error, line int) {
 
 func ReturnError(err error, line int) error {
 	if err != nil {
-		PrintError(err)
-		errorString := "Error is " + err + " on line " + line
-		return errors.New(errorString)
+		PrintError(err,325)
+		return err
 	}
+	return errors.New("Error")
 }

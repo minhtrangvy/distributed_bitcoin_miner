@@ -31,7 +31,7 @@ func main() {
 
 	// Send request to server
 	request := bitcoin.NewRequest(message, uint64(0), maxNonce)
-	m_msg, marshal_err := json.Marshal(msg)
+	m_msg, marshal_err := json.Marshal(request)
 	printError(marshal_err, "Failed to marshal message.")
 	_, write_msg_err := client.Write(m_msg)
 	printError(write_msg_err, "Failed to write message to server.")

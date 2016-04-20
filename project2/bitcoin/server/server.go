@@ -23,6 +23,8 @@ type bitcoin_server struct {
 	avail_miners	*list.List 					/* A list of miner IDs */
 	clients 		map[int]*bitcoin_client
 	requests 		chan *bitcoin_job
+
+	isClosed		chan int 					/* If server initiates the close */
 }
 
 type bitcoin_job struct {
@@ -35,10 +37,6 @@ type bitcoin_client struct {
 	minHash 		uint64
 	minNonce		uint64
 	assigned_miners	*list.List 					/* A list of miner IDs */
-
-	// data			string
-	// lower			uint64
-	// upper			uint64
 }
 
 
@@ -96,9 +94,6 @@ func (s *lsp.Server) acceptMessage(bit_server &bitcoin_server) {
 										  minHash: maxUint64,
 										  minNonce: maxUint64,
 										  assigned_miners: new list.List(),}
-										   // data: message.Data,
-										   // lower: message.Lower,
-										   // upper: message.Upper}
 
 			clients[conn_id] = bit_client
 			requests.PushBack(&bitcoin_job{client_id: conn_id,
@@ -112,33 +107,36 @@ func (s *lsp.Server) acceptMessage(bit_server &bitcoin_server) {
 			job := all_miners[conn_id]
 			client_id := job.client_id
 
-			// Determine whether the job returns a new minimum 
-			// nonce and hash for the client
-			if givenHash < clients[client_id].minHash {
+			// If the client_id exists in client, determine whether the 
+			// job returns a new minimum nonce and hash for the client
+			if (clients[client_id]) {
+				if givenHash < clients[client_id].minHash {
 				clients[client_id].minHash = givenHash
-				clients[client_id].minNonce = givenNonce
-			}
+					clients[client_id].minNonce = givenNonce
+				}
 
-			// Delete the miner from the client's list of miners and
-			// add the miner to the list of available miners
-			clients[client_id].assigned_miners.Remove(conn_id)
-			s.avail_miners.PushBack(conn_id)
+				// Delete the miner from the client's list of miners and
+				// add the miner to the list of available miners
+				clients[client_id].assigned_miners.Remove(conn_id)
 
-			// If all the client's miners are done and the connection
-			// still exists, then write result back to client
-			if clients[client_id].assigned_miners.Length() == 0 {
-				result := bitcoin.NewResult(clients[client_id].minHash, clients[client_id].minNonce)
-				m_msg, marshal_err := json.Marshal(result)
-				printError(marshal_err, "Failed to marshal message.")
+				// If all the client's miners are done and the connection
+				// still exists, then write result back to client
+				if clients[client_id].assigned_miners.Length() == 0 {
+					result := bitcoin.NewResult(clients[client_id].minHash, clients[client_id].minNonce)
+					m_msg, marshal_err := json.Marshal(result)
+					printError(marshal_err, "Failed to marshal message.")
 
-				_, write_msg_err := s.Write(m_msg)
-				printError(write_msg_err, "Failed to write message to server.")
-				
-				// If write fails, the client is disconnected
-				if write_msg_err != null {
-					delete(clients, client_id)
+					_, write_msg_err := s.Write(m_msg)
+					printError(write_msg_err, "Failed to write message to server.")
+					
+					// If write fails, the client is disconnected
+					if write_msg_err != null {
+						delete(clients, client_id)
+					}
 				}
 			}
+
+			s.avail_miners.PushBack(conn_id)
 		}
 
 }
@@ -149,35 +147,47 @@ func (s *lsp.Server) scheduleJobs(bit_server &bitcoin_server) {
 	case curr_job := <-requests:		/* When a request is received */
 		// Extract information from request
 		client_id := curr_job.client_id
-		minNonce := curr_job.message.Lower
-		maxNonce := curr_job.message.Upper
 
-		// Assign request to an available miner
-		numJobs := (maxNonce - minNonce)/minerLoad
-		for i := 0; i < numJobs; i++ {
-			assigned := false
-			for !(assigned) {
-				if avail_miners.Length() > 0 {
-					miner_id := avail_miners.Front()
-					assigned = true
+		// If the client_id no longer exists, we don't want to do anything
+		if (clients[client_id]) {
+			minNonce := curr_job.message.Lower
+			maxNonce := curr_job.message.Upper
 
-					// Send request to server
-					request := bitcoin.NewRequest(curr_job.message.Data, minNonce, maxNonce)
-					m_msg, marshal_err := json.Marshal(request)
-					printError(marshal_err, "Failed to marshal message.")
+			// Assign request to an available miner
+			numJobs := (maxNonce - minNonce)/minerLoad
+			for i := 0; i < numJobs; i++ {
+				assigned := false
+				for !(assigned) {
+					if avail_miners.Length() > 0 {
+						miner_id := avail_miners.Front()
 
-					_, write_msg_err := client.Write(m_msg)
-					printError(write_msg_err, "Failed to send request to miner.")
-					// If we fail to send the request to server, the miner is closed
-					if write_msg_err != nil {
+						// Send request to server
+						lowerRange := minNonce + (i * minerLoad)
+						upperRange := maxNonce
+						if (lowerRange + minerLoad < maxNonce) {
+							upperRange := lowerRange + minerLoad
+						}
+						
+						request := bitcoin.NewRequest(curr_job.message.Data, lowerRange , upperRange)
+						m_msg, marshal_err := json.Marshal(request)
+						printError(marshal_err, "Failed to marshal message.")
+
+						_, write_msg_err := s.Write(miner_id, m_msg)
+						printError(write_msg_err, "Failed to send request to miner.")
+						// If we fail to send the request to server, the miner is closed
+						if write_msg_err != nil {
+							all_miners.Remove(miner_id)
+						} else {
+							assigned = true
+
+							// Update assignments in structs
+							all_miners[miner_id] = &bitcoin_job{client_id: client_id,
+																message: curr_job.message}
+							s.clients.assigned_miners.PushBack(miner_id)
+						}
+
 						delete(avail_miners, miner_id)
-						all_miners.Remove(miner_id)
 					}
-
-					// Update assignments in structs
-					all_miners[miner_id] = &bitcoin_job{client_id: client_id,
-														message: curr_job.message}
-					s.clients.assigned_miners.PushBack(miner_id)
 				}
 			}
 		}

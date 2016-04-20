@@ -34,7 +34,9 @@ func main() {
 	m_msg, marshal_err := json.Marshal(request)
 	printError(marshal_err, "Failed to marshal message.")
 	_, write_msg_err := client.Write(m_msg)
-	printError(write_msg_err, "Failed to write message to server.")
+	if write_msg_err != nil {
+		printDisconnected()
+	}
 
 	// Wait for results from server
 	results, read_err := client.Read()

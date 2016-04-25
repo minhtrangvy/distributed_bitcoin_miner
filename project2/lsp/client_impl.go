@@ -90,7 +90,6 @@ func NewClient(hostport string, params *Params) (Client, error) {
 	current_client.PrintError(dial_err)
 
 	current_client.connection = current_conn
-	current_client.address = serverAddr
 
 	// Go routines
 	go current_client.master()

@@ -5,7 +5,7 @@ package lsp
 import "errors"
 import "encoding/json"
 import "fmt"
-// import "os"
+import "os"
 import "time"
 import "github.com/minhtrangvy/distributed_bitcoin_miner/project2/lspnet"
 // import "reflect"
@@ -18,21 +18,22 @@ const (
 type client struct {
 	connID 			int
 	connection		*lspnet.UDPConn
+	address			*lspnet.UDPAddr
 	currWriteSN		int
 	lowestUnackSN 	int
 	expectedSN	 	int						// SN we expect to receive next
-				
+
 	allAck			bool					// All sent data messages have been ack
 
 	connectCh		(chan *Message)
 	readCh			(chan *Message) 		// data messages to be printed
 	writeCh			(chan *Message) 		// data messages to be written to server
-	
-	closeCh			(chan int)				// Close() has been called
 
+	closeCh			(chan int)				// Close() has been called
+	isClosed		bool
 
 	intermedReadCh  (chan *Message)
-	epochCh			(chan Time)
+	epochCh			(<-chan time.Time)
 	dataWindow		map[int]*Message		// map from SN to *Message of unacknowledged data messages we have sent
 	ackWindow		map[int]*Message		// map of the last windowSize acks that we have sent
 
@@ -54,18 +55,42 @@ type client struct {
 // and port number (i.e., "localhost:9999").
 func NewClient(hostport string, params *Params) (Client, error) {
 
+	current_client := &client {
+		connID:			0,
+		currWriteSN: 	1,
+		lowestUnackSN: 	0,
+		expectedSN: 	0,							// SN we expect to receive next
+
+		allAck:			false,					// All sent data messages have been ack
+
+		connectCh:		make(chan *Message),
+		readCh:			make(chan *Message), 		// data messages to be printed
+		writeCh:		make(chan *Message), 		// data messages to be written to server
+
+		closeCh:		make(chan int),				// Close() has been called
+		isClosed:		false,
+
+		intermedReadCh: make(chan *Message),
+		epochCh:		make(<-chan time.Time),
+		dataWindow:		make(map[int]*Message),		// map from SN to *Message of unacknowledged data messages we have sent
+		ackWindow:		make(map[int]*Message),		// map of the last windowSize acks that we have sent
+
+		numEpochs:		0, 					// number of epochs that have occurred
+		windowSize: 	params.WindowSize,
+		epochMilli: 	params.EpochMillis,
+		epochLimit: 	params.EpochLimit,
+	}
+
 	serverAddr, resolve_err := lspnet.ResolveUDPAddr("udp", hostport)
-	PrintError(resolve_err, 28)
+	current_client.PrintError(resolve_err)
 
 	// Send connect message to server
-	connection, dial_err := lspnet.DialUDP("udp", nil, serverAddr)
-	PrintError(dial_err, 59)
+	current_conn, dial_err := lspnet.DialUDP("udp", nil, serverAddr)
+	fmt.Println(hostport)
+	current_client.PrintError(dial_err)
 
-	current_client := &client {
-		windowSize: params.WindowSize,
-		epochMilli: params.EpochMilli,
-		epochLimit: params.EpochLimit
-	}
+	current_client.connection = current_conn
+	current_client.address = serverAddr
 
 	// Go routines
 	go current_client.master()
@@ -77,9 +102,9 @@ func NewClient(hostport string, params *Params) (Client, error) {
 	connectMsg.ConnID = 0
 	connectMsg.SeqNum = 0
 	m_msg, marshal_err := json.Marshal(connectMsg)
-	PrintError(marshal_err)
-	_, write_msg_err := connection.Write(m_msg)
-	PrintError(write_msg_err)
+	current_client.PrintError(marshal_err)
+	_, write_msg_err := current_conn.Write(m_msg)
+	current_client.PrintError(write_msg_err)
 
 	// Block until we get a connection ack back
 	connectAck := <- current_client.connectCh
@@ -100,26 +125,26 @@ func (c *client) ConnID() int {
 func (c *client) Read() ([]byte, error) {
 	msg := <- c.intermedReadCh
 	if msg == nil {
-		return nil, new.Error("")
+		return nil, errors.New("")
 	}
-
 	return msg.Payload, nil
 }
 
 func (c *client) Write(payload []byte) error {
-	// Close() has been called, so we need to stop putting messages
-	// into our write channel
 	if (!c.isClosed) {
 		msg := NewData(c.connID, c.currWriteSN, payload)
+		fmt.Println("client is in Write()")
 		c.writeCh <- msg
+		fmt.Println("client is in Write() 2")
+		fmt.Printf("%d\n", len(c.writeCh))
 		c.currWriteSN++
 	}
-
 	return nil
 }
 
 func (c *client) Close() error {
 	c.isClosed = true			// TODO: Do we need a channel as opposed to a bool?
+	return nil
 }
 
 // ===================== GO ROUTINES ================================
@@ -127,10 +152,12 @@ func (c *client) Close() error {
 func (c *client) master() {
 	// We want to exit this for loop once all pending messages to the server
 	// have been sent and acknowledged.
+	fmt.Println("master is running")
 	for {
 		select {
 		// Check to see if Close() has been called
 		case <- c.closeCh:
+			c.closeCh <- 1
 			return
 		case msg := <- c.readCh:
 			currentSN := msg.SeqNum
@@ -138,13 +165,18 @@ func (c *client) master() {
 			case MsgAck:
 				// If this is a acknowledgement for a connection request
 				if currentSN == 0 {
-					connectCh <- msg
+					c.connectCh <- msg
 				} else {
-					if val, ok := c.dataWindow[currentSN]; ok {
+					if _, ok := c.dataWindow[currentSN]; ok {
 						delete(c.dataWindow,currentSN)
 
+						// If we received an ack for the oldest unacked data msg
 						if currentSN == c.lowestUnackSN {
-							c.lowestUnackSN = c.findNewMin(c.dataWindow)
+							if len(c.dataWindow) == 0 {
+								c.lowestUnackSN = c.findNewMin(c.dataWindow)
+							} else {
+								c.lowestUnackSN++
+							}
 						}
 
 						// if Close() is called and writeCh is empty and dataWindow is empty
@@ -160,10 +192,7 @@ func (c *client) master() {
 					c.expectedSN++
 
 					ackMsg := NewAck(c.connID, currentSN)
-					m_msg, marshal_err := json.Marshal(ackMsg)
-					PrintError(marshal_err)
-					_, write_msg_err := c.connection.Write(m_msg)
-					PrintError(write_msg_err)
+					c.sendMessage(ackMsg)
 
 					oldestAckSN := c.findNewMin(c.ackWindow)
 					delete(c.ackWindow, oldestAckSN)
@@ -171,19 +200,27 @@ func (c *client) master() {
 				}
 			}
 
-		//
 		case msg := <- c.writeCh:
+			fmt.Println("there is something in the write channel")
 			msgSent := false
 			// If message cannot be sent, then keep trying until it is sent
 			for (!msgSent) {
 				// Check if we can write the message based on SN
-				if (msg.SeqNum <= c.lowestUnackSN + c.windowSize) {
+				fmt.Println("trying to send msg in writeCh")
+				if (c.lowestUnackSN <= msg.SeqNum && msg.SeqNum <= c.lowestUnackSN + c.windowSize) {
+					fmt.Printf("seq num is %d\n lowerunackSN is %d\n", msg.SeqNum,c.lowestUnackSN)
+					// c.sendMessage(msg)
 					m_msg, marshal_err := json.Marshal(msg)
-					PrintError(marshal_err)
+					c.PrintError(marshal_err)
 					_, write_msg_err := c.connection.Write(m_msg)
-					PrintError(write_msg_err)
+					if write_msg_err != nil {
+						fmt.Println("poop")
+						fmt.Fprintf(os.Stderr, "Client failed to write to the server. Exit code 1.", write_msg_err)
+						os.Exit(1)
+					}
+					fmt.Printf("just sent the msg to the server...?")
 					msgSent = true
-					allAck = false
+					c.allAck = false
 
 					// Change the data window to include sent message
 					c.dataWindow[msg.SeqNum] = msg
@@ -200,15 +237,19 @@ func (c *client) read() {
 	for {
 		select {
 			case <- c.closeCh:
+				c.closeCh <- 1 					// very hacky: we are putting it back in order to close the other go routines
 				return
 			default:
 				buff := make([]byte, 1500)
-				num_bytes_received, _, received_err := c.conn.ReadFromUDP(buff[0:])
-				PrintError(received_err)
+				num_bytes_received, _, received_err := c.connection.ReadFromUDP(buff[0:])
+				if received_err != nil {
+					fmt.Fprintf(os.Stderr, "Client failed to read from the server. Exit code 2.", received_err)
+					os.Exit(2)
+				}
 
 				received_msg := Message{}
-				unmarshall_err := json.Unmarshal(buff[0:num_bytes_received], &received_msg)
-				PrintError(unmarshall_err)
+				unmarshal_err := json.Unmarshal(buff[0:num_bytes_received], &received_msg)
+				c.PrintError(unmarshal_err)
 				c.readCh <- &received_msg
 
 		}
@@ -219,18 +260,19 @@ func (c *client) epoch() {
 	for {
 		select {
 		case <- c.closeCh:
+			c.closeCh <- 1
 			return
 		default:
 			// Once an epoch has been reached, epochCh is notified
-			c.epochCh = time.NewTicker(time.Duration(c.epochMilli) * time.MilliSecond).C
+			c.epochCh = time.NewTicker(time.Duration(c.epochMilli) * time.Millisecond).C
 		}
 	}
 }
 
 // ===================== HELPER FUNCTIONS ================================
 
-func (c *client) findNewMin(currentMap map) int {
-	currentLowest :=
+func (c *client) findNewMin(currentMap map[int]*Message) int {
+	currentLowest := MaxInt
 	for key, _ := range currentMap {
 		if key < currentLowest {
 			currentLowest = key
@@ -263,7 +305,7 @@ func (c *client) epochHelper() {
 		ackMsg := NewAck(c.connID, 0)
 		c.sendMessage(ackMsg)
 
-		ackWindow[0] = ackMsg
+		c.ackWindow[0] = ackMsg
 		return
 	}
 
@@ -284,20 +326,23 @@ func (c *client) epochHelper() {
 
 func (c *client) sendMessage(msg *Message) {
 	m_msg, marshal_err := json.Marshal(msg)
-	PrintError(marshal_err)
+	c.PrintError(marshal_err)
 	_, write_msg_err := c.connection.Write(m_msg)
-	PrintError(write_msg_err)
+	if write_msg_err != nil {
+		fmt.Fprintf(os.Stderr, "Client failed to write to the server. Exit code 1.", write_msg_err)
+		os.Exit(1)
+	}
 }
 
-func PrintError(err error) {
+func (c *client) PrintError(err error) {
 	if err != nil {
 		fmt.Println("The error is: ", err)
 	}
 }
 
-func ReturnError(err error, line int) error {
+func (c *client) ReturnError(err error, line int) error {
 	if err != nil {
-		PrintError(err,325)
+		c.PrintError(err)
 		return err
 	}
 	return errors.New("Error")

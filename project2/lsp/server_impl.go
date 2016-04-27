@@ -23,6 +23,7 @@ type server struct {
 	windowSize		int
 	epochMilli		int
 	epochLimit		int
+	verbose			bool
 }
 
 // NewServer creates, initiates, and returns a new server. This function should
@@ -42,10 +43,11 @@ func NewServer(port int, params *Params) (Server, error) {
 		closeCh:		make(chan int),				// Close() has been called
 		intermedReadCh: make(chan *Message),
 		isClosed:		false,
-		
+
 		windowSize: 	params.WindowSize,
 		epochMilli: 	params.EpochMillis,
 		epochLimit: 	params.EpochLimit,
+		verbose:		true,
 	}
 
 	// desiredAddr := lspnet.JoinHostPort("localhost", strconv.Itoa(port))
@@ -103,12 +105,20 @@ func (s *server) read() {
 	for {
 		select {
 			case <- s.closeCh:
+				if s.verbose {
+					fmt.Println("we are in read()'s choseCh case, closing the server'")
+				}
 				// Loop through all clients and tell them to close
 				for _, client := range s.clients {
 					client.closeCh <- 1
 				}
 
+				if s.verbose {
+					fmt.Println("put a 1 in each client's closeCh")
+				}
+
 				s.closeCh <- 1 					// very hacky: we are putting it back in order to close the other go routines
+
 				return
 
 			default:
@@ -120,6 +130,10 @@ func (s *server) read() {
 				if received_err != nil {
 					s.clients[s.clientsAddr[client_addr]].closeCh <- 1
 					fmt.Fprintf(os.Stderr, "Server failed to read from the client. Exit code 2.", received_err)
+				} else {
+					if s.verbose {
+						fmt.Println("server received something!")
+					}
 				}
 
 				received_msg := Message{}
@@ -130,6 +144,9 @@ func (s *server) read() {
 				if received_msg.Type == MsgConnect {
 					if _, ok := s.clientsAddr[client_addr]; !ok {
 						if received_msg.SeqNum == 0 {
+							if s.verbose {
+								fmt.Println("It was a connect message and didn't exist yet")
+							}
 							s.numClients++
 
 							curr_client := &client{
@@ -153,7 +170,17 @@ func (s *server) read() {
 							}
 
 							ackMsg := NewAck(curr_client.connID, 0)
-							s.sendMessage(ackMsg)
+							m_msg, marshal_err := json.Marshal(ackMsg)
+							s.PrintError(marshal_err)
+							_, write_err := s.connection.WriteToUDP(m_msg, s.clients[clientID].address)
+							if write_err != nil {
+								s.clients[clientID].closeCh <- 1				// Failed to write, connection lost
+								fmt.Printf("Current client ID is %d\n", clientID)
+								fmt.Fprintf(os.Stderr, "Server failed to write to the client. Exit code 1.", write_err)
+							}
+							if s.verbose {
+								fmt.Println("sent connection ack back to client")
+							}
 
 							s.clients[curr_client.connID] = curr_client
 							s.clientsAddr[client_addr] = curr_client.connID
@@ -214,7 +241,14 @@ func (s *server) clientHandler(clientID int) {
 					s.clients[clientID].expectedSN++
 
 					ackMsg := NewAck(clientID, currentSN)
-					s.sendMessage(ackMsg)
+					m_msg, marshal_err := json.Marshal(ackMsg)
+					s.PrintError(marshal_err)
+					_, write_err := s.connection.WriteToUDP(m_msg, s.clients[clientID].address)
+					if write_err != nil {
+						s.clients[clientID].closeCh <- 1				// Failed to write, connection lost
+						fmt.Printf("Current client ID is %d\n", clientID)
+						fmt.Fprintf(os.Stderr, "Server failed to write to the client. Exit code 1.", write_err)
+					}
 
 					oldestAckSN := s.findNewMin(s.clients[clientID].ackWindow)
 					delete(s.clients[clientID].ackWindow, oldestAckSN)
@@ -230,7 +264,6 @@ func (s *server) clientHandler(clientID int) {
 			// connection has been lost.
 			if write_err != nil {
 				s.clients[clientID].closeCh <- 1
-
 				fmt.Printf("Current client ID is %d\n", clientID)
 				fmt.Fprintf(os.Stderr, "Server failed to write to the client. Exit code 1.", write_err)
 			}
@@ -247,19 +280,40 @@ func (s *server) clientHandler(clientID int) {
 				// 	the client's connection request
 				if s.clients[clientID].expectedSN == 1 {
 					ackMsg := NewAck(clientID, 0)
-					s.sendMessage(ackMsg)
+					m_msg, marshal_err := json.Marshal(ackMsg)
+					s.PrintError(marshal_err)
+					_, write_err := s.connection.WriteToUDP(m_msg, s.clients[clientID].address)
+					if write_err != nil {
+						s.clients[clientID].closeCh <- 1				// Failed to write, connection lost
+						fmt.Printf("Current client ID is %d\n", clientID)
+						fmt.Fprintf(os.Stderr, "Server failed to write to the client. Exit code 1.", write_err)
+					}
 				}
 
 				// For each data message that has been sent but not yet acknowledged,
 				// resend the data message
 				for _, value := range s.clients[clientID].dataWindow {
-					s.sendMessage(value)
+					m_msg, marshal_err := json.Marshal(value)
+					s.PrintError(marshal_err)
+					_, write_err := s.connection.WriteToUDP(m_msg, s.clients[clientID].address)
+					if write_err != nil {
+						s.clients[clientID].closeCh <- 1				// Failed to write, connection lost
+						fmt.Printf("Current client ID is %d\n", clientID)
+						fmt.Fprintf(os.Stderr, "Server failed to write to the client. Exit code 1.", write_err)
+					}
 				}
 
 				// Resend an acknowledgement message for each of the last w (or fewer)
 				// distinct data messages that have been received
 				for _, value := range s.clients[clientID].ackWindow {
-					s.sendMessage(value)
+					m_msg, marshal_err := json.Marshal(value)
+					s.PrintError(marshal_err)
+					_, write_err := s.connection.WriteToUDP(m_msg, s.clients[clientID].address)
+					if write_err != nil {
+						s.clients[clientID].closeCh <- 1				// Failed to write, connection lost
+						fmt.Printf("Current client ID is %d\n", clientID)
+						fmt.Fprintf(os.Stderr, "Server failed to write to the client. Exit code 1.", write_err)
+					}
 				}
 
 				s.clients[clientID].numEpochs++
@@ -287,6 +341,7 @@ func (s *server) findNewMin(currentMap map[int]*Message) int {
 	return currentLowest
 }
 
+// Grabs the right address, marshals the message, writes to udp and exit if the message didn't send
 func (s *server) sendMessage(msg *Message) {
 	m_msg, marshal_err := json.Marshal(msg)
 	s.PrintError(marshal_err)

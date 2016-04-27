@@ -8,38 +8,33 @@ import "time"
 import "github.com/minhtrangvy/distributed_bitcoin_miner/project2/lspnet"
 import "strconv"
 
-type client struct {
-	connID 			int
-	connAddr		*lspnet.UDPAddr
-	lowestUnackSN	int
-
-	currWriteSN		int 					// The SN of the message to write to the client
-	expectedSN	 	int
-	writeCh			(chan *Message)
-
-	closeCh			(chan int)				// Close() has been called
-
-	dataWindow		map[int]*Message
-	ackWindow		map[int]*Message
-}
+// type client struct {
+// 	connID 			int
+// 	connAddr		*lspnet.UDPAddr
+// 	lowestUnackSN	int
+// 	currWriteSN		int 					// The SN of the message to write to the client
+// 	expectedSN	 	int
+// 	writeCh			(chan *Message)
+// 	closeCh			(chan int)				// Close() has been called
+// 	dataWindow		map[int]*Message
+// 	ackWindow		map[int]*Message
+// }
 
 type server struct {
 	connection 		*lspnet.UDPConn
 	numClients		int
 	clients			map[int]*client
+	clientsAddr		map[*lspnet.UDPAddr]int
 	lowestUnackSN 	int
-	expectedSN	 	int
-
 	allAck			bool
 
 	readCh	 		(chan *Message)
 
 	closeCh			(chan int)				// Close() has been called
 	isClosed		bool
+	intermedReadCh 	(chan *Messages)
 
 	epochCh			(<-chan time.Time)
-
-	numEpochs		int 					// number of epochs that have occurred
 	windowSize		int
 	epochMilli		int
 	epochLimit		int
@@ -57,20 +52,14 @@ func NewServer(port int, params *Params) (Server, error) {
 		clients:	    make(map[int]*client),
 		lowestUnackSN: 	0,
 		expectedSN:	 	0,
-
 		allAck:			false,
-
 		readCh:			make(chan *Message), 		// data messages to be written to server
 		writeCh:		make(chan *Message),
-
 		closeCh:		make(chan int),				// Close() has been called
 		isClosed:		false,
-
 		epochCh:		make(<-chan time.Time),
 		dataWindow:		make(map[int]*Message),		// map from SN to *Message of unacknowledged data messages we have sent
 		ackWindow:		make(map[int]*Message),		// map of the last windowSize acks that we have sent
-
-		numEpochs:		0, 					// number of epochs that have occurred
 		windowSize: 	params.WindowSize,
 		epochMilli: 	params.EpochMillis,
 		epochLimit: 	params.EpochLimit,
@@ -94,17 +83,17 @@ func NewServer(port int, params *Params) (Server, error) {
 }
 
 func (s *server) Read() (int, []byte, error) {
-	// TODO: remove this line when you are ready to begin implementing this method.
-	select {} // Blocks indefinitely.
-
-	// Pull from write channel 
-	return -1, nil, errors.New("not yet implemented")
+	select {
+	// // cases for closing
+	// 	// TODO return -1, nil, errors.New("client closed or something")
+	case msg <- s.intermedReadCh:
+		return msg.ConnID, msg.Payload, nil
+	}
 }
 
 func (s *server) Write(connID int, payload []byte) error {
 	msg := NewData(connID, s.clients[connID].currWriteSN, payload)
-	s.writeCh <- msg
-
+	s.clients[connID].writeCh <- msg
 	s.clients[connID].currWriteSN++
 	return nil 				// TODO: Return non-nil error when connection with connID is lost
 }
@@ -120,44 +109,7 @@ func (s *server) Close() error {
 // ===================== GO ROUTINES ================================
 
 func (s *server) master() {
-	for {
-		case msg := <- s.readCh:
-			currentSN := msg.SeqNum
-			currentConnID := msg.ConnID
 
-			switch msg.Type {
-			case MsgAck:
-				if _, ok := s.clients[currentConnID].dataWindow[currentSN]; ok {
-					delete(s.clients[currentConnID].dataWindow, currentSN)
-
-					// If we received an ack for the oldest unacked data msg
-					if currentSN == s.clients[currentConnID].lowestUnackSN {
-						if len(s.clients[currentConnID].dataWindow) == 0 {
-							s.clients[currentConnID].lowestUnackSN = s.findNewMin(s.clients[currentConnID].dataWindow)
-						} else {
-							s.clients[currentConnID].lowestUnackSN++
-						}
-					}
-				}
-
-			case MsgData:
-				// Drop any message that isn't the expectedSN
-				if (currentSN == s.clients[currentConnID].expectedSN) {
-					c.intermedReadCh <- msg
-					c.expectedSN++
-
-					ackMsg := NewAck(c.connID, currentSN)
-					c.sendMessage(ackMsg)
-
-					oldestAckSN := c.findNewMin(c.ackWindow)
-					delete(c.ackWindow, oldestAckSN)
-					c.ackWindow[currentSN] = ackMsg
-				}
-
-			default:
-
-		}
-	}
 }
 
 func (s *server) read() {
@@ -180,36 +132,106 @@ func (s *server) read() {
 
 				// If the message type is Connect, deal with it here
 				if received_msg.Type == MsgConnect {
-					if msg.SeqNum == 0 {
-						numClients++
+					if (msg.SeqNum == 0) && (_, ok := s.clientsAddr[client_addr]; !ok) {
+						s.numClients++
 
 						curr_client := &client{
 							connID:		 s.numClients,
-							connAddr: 	 client_addr,
+							address: 	 client_addr,
 
 							currWriteSN: 1,
-							expectedSN:	 0,
+							expectedSN:	 1,
 
 							closeCh:	 make(chan int),
 							isClosed:	 false,
+
+							numEpochs: 	0,
 						}
 
 						ackMsg := NewAck(curr_client.connID, 0)
 						s.sendMessage(ackMsg)
 
 						s.clients[curr_client.connID] = curr_client
+						s.clientsAddr[client_addr] = curr_client.connID
+
+						go clientHandler(curr_client.connID)
 					}
 
 				// Otherwise, put it into the read channel
 				} else {
-					s.readCh <- &received_msg
+					currentID := s.clientsAddr[client_addr]
+					s.clients[currentID].readCh <- &received_msg
 				}
 		}
 	}
 }
 
-func (s *server) epoch() {
+func (s *server) clientHandler(clientID int) {
+	s.clients[clientID].epochCh = time.NewTicker(time.Duration(c.epochMilli) * time.Millisecond).C
+	for {
+	case msg := <- s.clients[clientID].readCh:
+		currentSN := msg.SeqNum
+		// TODO: is clientID and msg.ConnID the same?
+		switch msg.Type {
+		case MsgAck:
+			if _, ok := s.clients[clientID].dataWindow[currentSN]; ok {
+				delete(s.clients[clientID].dataWindow, currentSN)
 
+				// If we received an ack for the oldest unacked data msg
+				if currentSN == s.clients[clientID].lowestUnackSN {
+					if len(s.clients[clientID].dataWindow) == 0 {
+						s.clients[clientID].lowestUnackSN = s.findNewMin(s.clients[clientID].dataWindow)
+					} else {
+						s.clients[clientID].lowestUnackSN++
+					}
+				}
+			}
+		case MsgData:
+			// Drop any message that isn't the expectedSN
+			s.clients[currentConnID].numEpochs = 0
+			if (currentSN == s.clients[clientID].expectedSN) {
+				s.intermedReadCh <- msg
+				s.clients[currentConnID].expectedSN++
+
+				ackMsg := NewAck(currentConnID, currentSN)
+				s.sendMessage(ackMsg)
+
+				oldestAckSN := s.findNewMin(s.clients[currentConnID].ackWindow)
+				delete(s.clients[currentConnID].ackWindow, oldestAckSN)
+				s.clients[currentConnID].ackWindow[currentSN] = ackMsg
+		}
+	case msg := <- s.clients[clientID].writeCh:
+		m_msg, marshal_err := json.Marshal(msg)
+		s.PrintError(marshal_err)
+		n, write_err = s.connection.WriteToUDP(m_msg, s.clients[connID].address)
+		if write_msg_err != nil {
+			fmt.Printf("Current client ID is %d\n", clientID)
+			fmt.Fprintf(os.Stderr, "Server failed to write to the client. Exit code 1.", write_msg_err)
+			os.Exit(1)
+		}
+	// If an epoch happens for that client
+	case <- s.clients[clientID].epochCh:
+		// If no data messages have been received from the client, then resend an ack msg for
+		// 	the client's connection request
+		if s.clients[clientID].expectedSN == 1 {
+			ackMsg := NewAck(clientID, 0)
+			s.sendMessage(ackMsg)
+		}
+
+		// For each data message that has been sent but not yet acknowledged,
+		// resend the data message
+		for _, value := range s.clients[clientID].dataWindow {
+			s.sendMessage(value)
+		}
+
+		// Resend an acknowledgement message for each of the last w (or fewer)
+		// distinct data messages that have been received
+		for _, value := range s.clients[clientID].ackWindow {
+			s.sendMessage(value)
+		}
+
+		s.clients[clientID].numEpochs++
+	}
 }
 
 // ===================== HELPER FUNCTIONS ================================
@@ -246,4 +268,3 @@ func (s *server) ReturnError(err error, line int) error {
 	}
 	return errors.New("Error")
 }
-

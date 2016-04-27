@@ -130,15 +130,17 @@ func (s *server) read() {
 				if received_err != nil {
 					s.clients[s.clientsAddr[client_addr]].closeCh <- 1
 					fmt.Fprintf(os.Stderr, "Server failed to read from the client. Exit code 2.", received_err)
-				} else {
-					if s.verbose {
-						fmt.Println("server received something!")
-					}
+					return
 				}
 
 				received_msg := Message{}
 				unmarshal_err := json.Unmarshal(buff[0:num_bytes_received], &received_msg)
 				s.PrintError(unmarshal_err)
+
+				if s.verbose {
+					fmt.Fprintf(os.Stderr, "server received %s\n", string(received_msg.Payload))
+					fmt.Fprintf(os.Stderr, "server received message of type %d\n", received_msg.Type)
+				}
 
 				// If the message type is Connect, deal with it here
 				if received_msg.Type == MsgConnect {
@@ -172,10 +174,10 @@ func (s *server) read() {
 							ackMsg := NewAck(curr_client.connID, 0)
 							m_msg, marshal_err := json.Marshal(ackMsg)
 							s.PrintError(marshal_err)
-							_, write_err := s.connection.WriteToUDP(m_msg, s.clients[clientID].address)
+							_, write_err := s.connection.WriteToUDP(m_msg, client_addr)
 							if write_err != nil {
-								s.clients[clientID].closeCh <- 1				// Failed to write, connection lost
-								fmt.Printf("Current client ID is %d\n", clientID)
+								s.clients[curr_client.connID].closeCh <- 1				// Failed to write, connection lost
+								fmt.Printf("Current client ID is %d\n", curr_client.connID)
 								fmt.Fprintf(os.Stderr, "Server failed to write to the client. Exit code 1.", write_err)
 							}
 							if s.verbose {
@@ -191,6 +193,9 @@ func (s *server) read() {
 
 				// Otherwise, put it into the read channel
 				} else {
+					if s.verbose {
+						fmt.Println("Received an ack or data msg.")
+					}
 					currentID := s.clientsAddr[client_addr]
 					s.clients[currentID].readCh <- &received_msg
 				}
@@ -240,6 +245,9 @@ func (s *server) clientHandler(clientID int) {
 					s.intermedReadCh <- msg
 					s.clients[clientID].expectedSN++
 
+					if s.verbose {
+						fmt.Println("Received a data message of the expectedSN, sending ack back.")
+					}
 					ackMsg := NewAck(clientID, currentSN)
 					m_msg, marshal_err := json.Marshal(ackMsg)
 					s.PrintError(marshal_err)
@@ -339,17 +347,6 @@ func (s *server) findNewMin(currentMap map[int]*Message) int {
 		}
 	}
 	return currentLowest
-}
-
-// Grabs the right address, marshals the message, writes to udp and exit if the message didn't send
-func (s *server) sendMessage(msg *Message) {
-	m_msg, marshal_err := json.Marshal(msg)
-	s.PrintError(marshal_err)
-	_, write_msg_err := s.connection.Write(m_msg)
-	if write_msg_err != nil {
-		fmt.Fprintf(os.Stderr, "Server failed to write to the client. Exit code 1.", write_msg_err)
-		os.Exit(1)
-	}
 }
 
 func (s *server) PrintError(err error) {

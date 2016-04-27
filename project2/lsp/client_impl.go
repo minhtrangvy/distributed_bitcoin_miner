@@ -185,6 +185,7 @@ func (c *client) master() {
 				if (currentSN == c.expectedSN) {
 					c.intermedReadCh <- msg
 					c.expectedSN++
+					c.numEpochs = 0
 
 					ackMsg := NewAck(c.connID, currentSN)
 					c.sendMessage(ackMsg)

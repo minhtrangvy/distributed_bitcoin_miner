@@ -75,7 +75,6 @@ func NewServer(port int, params *Params) (Server, error) {
 	current_server.connection = current_conn
 
 	// Go routines
-	go current_server.master()
 	go current_server.read()
 	go current_server.epoch()
 
@@ -84,6 +83,12 @@ func NewServer(port int, params *Params) (Server, error) {
 
 func (s *server) Read() (int, []byte, error) {
 	select {
+	// Connection to some client has been explicitly closed
+	case <- s.closeCh:
+		return 0, nil, errors.New("Channel has been closed")
+	// Connection has been lost due to an epoch timeout and no other
+	
+
 	// // cases for closing
 	// 	// TODO return -1, nil, errors.New("client closed or something")
 	case msg <- s.intermedReadCh:
@@ -99,31 +104,38 @@ func (s *server) Write(connID int, payload []byte) error {
 }
 
 func (s *server) CloseConn(connID int) error {
-	return errors.New("not yet implemented")
+	s.clients[connID].closeCh <- 1
+	return nil
 }
 
 func (s *server) Close() error {
-	return errors.New("not yet implemented")
+	s.isClosed = true
+	return nil
 }
 
 // ===================== GO ROUTINES ================================
-
-func (s *server) master() {
-
-}
 
 func (s *server) read() {
 	for {
 		select {
 			case <- s.closeCh:
-				c.closeCh <- 1 					// very hacky: we are putting it back in order to close the other go routines
+				// Loop through all clients and tell them to close
+				for _, client := range s.clients {
+					client.closeCh <- 1
+				}
+
+				s.closeCh <- 1 					// very hacky: we are putting it back in order to close the other go routines
 				return
+
 			default:
 				buff := make([]byte, 1500)
 				num_bytes_received, client_addr, received_err := s.connection.ReadFromUDP(buff[0:])
+
+				// If we fail to read from the connection, we want to disconnect from the client, because
+				// it has been closed.
 				if received_err != nil {
+					s.clients[s.clientsAddr[client_addr]].closeCh <- 1
 					fmt.Fprintf(os.Stderr, "Server failed to read from the client. Exit code 2.", received_err)
-					os.Exit(2)
 				}
 
 				received_msg := Message{}
@@ -185,6 +197,20 @@ func (s *server) clientHandler(clientID int) {
 						s.clients[clientID].lowestUnackSN++
 					}
 				}
+
+				// Check if all data message have been sent and acknowledged. If so, the
+				// server can be closed
+				readyToClose := true
+				for _, client := range s.clients {
+					if !(s.isClosed && len(client.writeCh) == 0 && len(client.dataWindow) == 0) {
+						readyToClose = false
+						break
+					}
+				}
+
+				if readyToClose {
+					s.closeCh <- 1
+				}
 			}
 		case MsgData:
 			// Drop any message that isn't the expectedSN
@@ -204,33 +230,53 @@ func (s *server) clientHandler(clientID int) {
 		m_msg, marshal_err := json.Marshal(msg)
 		s.PrintError(marshal_err)
 		n, write_err = s.connection.WriteToUDP(m_msg, s.clients[connID].address)
+
+		// If we fail to write to a client, that means the client has been closed or
+		// connection has been lost.
 		if write_msg_err != nil {
+			s.clients[clientID].closeCh <- 1
+
 			fmt.Printf("Current client ID is %d\n", clientID)
 			fmt.Fprintf(os.Stderr, "Server failed to write to the client. Exit code 1.", write_msg_err)
-			os.Exit(1)
 		}
+
 	// If an epoch happens for that client
 	case <- s.clients[clientID].epochCh:
-		// If no data messages have been received from the client, then resend an ack msg for
-		// 	the client's connection request
-		if s.clients[clientID].expectedSN == 1 {
-			ackMsg := NewAck(clientID, 0)
-			s.sendMessage(ackMsg)
+		// If the numEpochs has reached the limit, we need to disconnect
+		// from the connection
+		if s.clients[clientID].numEpochs >= s.epochLimit {
+			s.clients[clientID].closeCh <- 1
+
+		} else {
+			// If no data messages have been received from the client, then resend an ack msg for
+			// 	the client's connection request
+			if s.clients[clientID].expectedSN == 1 {
+				ackMsg := NewAck(clientID, 0)
+				s.sendMessage(ackMsg)
+			}
+		
+			// For each data message that has been sent but not yet acknowledged,
+			// resend the data message
+			for _, value := range s.clients[clientID].dataWindow {
+				s.sendMessage(value)
+			}
+
+			// Resend an acknowledgement message for each of the last w (or fewer)
+			// distinct data messages that have been received
+			for _, value := range s.clients[clientID].ackWindow {
+				s.sendMessage(value)
+			}
+
+			s.clients[clientID].numEpochs++
 		}
 
-		// For each data message that has been sent but not yet acknowledged,
-		// resend the data message
-		for _, value := range s.clients[clientID].dataWindow {
-			s.sendMessage(value)
-		}
+	// TODO: This could be bad
+	// When the client receives something in its close channel, close the client.
+	case <- s.clients[clientID].closeCh:
+		s.clients[clientID].Close()
 
-		// Resend an acknowledgement message for each of the last w (or fewer)
-		// distinct data messages that have been received
-		for _, value := range s.clients[clientID].ackWindow {
-			s.sendMessage(value)
-		}
-
-		s.clients[clientID].numEpochs++
+		delete(s.clientsAddr, s.clients[clientID].address)
+		delete(s.clients, clientID)
 	}
 }
 

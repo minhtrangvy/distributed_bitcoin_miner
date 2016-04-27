@@ -23,8 +23,6 @@ type client struct {
 	lowestUnackSN 	int
 	expectedSN	 	int						// SN we expect to receive next
 
-	allAck			bool					// All sent data messages have been ack
-
 	connectCh		(chan *Message)
 	readCh			(chan *Message) 		// data messages to be printed
 	writeCh			(chan *Message) 		// data messages to be written to server
@@ -60,8 +58,6 @@ func NewClient(hostport string, params *Params) (Client, error) {
 		currWriteSN: 	1,
 		lowestUnackSN: 	0,
 		expectedSN: 	0,							// SN we expect to receive next
-
-		allAck:			false,					// All sent data messages have been ack
 
 		connectCh:		make(chan *Message),
 		readCh:			make(chan *Message), 		// data messages to be printed
@@ -219,7 +215,6 @@ func (c *client) master() {
 					}
 					fmt.Printf("just sent the msg to the server...?")
 					msgSent = true
-					c.allAck = false
 
 					// Change the data window to include sent message
 					c.dataWindow[msg.SeqNum] = msg

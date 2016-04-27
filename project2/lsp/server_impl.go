@@ -87,7 +87,7 @@ func (s *server) Read() (int, []byte, error) {
 	case <- s.closeCh:
 		return 0, nil, errors.New("Channel has been closed")
 	// Connection has been lost due to an epoch timeout and no other
-	
+
 
 	// // cases for closing
 	// 	// TODO return -1, nil, errors.New("client closed or something")
@@ -144,20 +144,22 @@ func (s *server) read() {
 
 				// If the message type is Connect, deal with it here
 				if received_msg.Type == MsgConnect {
-					if (msg.SeqNum == 0) && (_, ok := s.clientsAddr[client_addr]; !ok) {
-						s.numClients++
+					if _, ok := s.clientsAddr[client_addr]; ok {
+						if msg.SeqNum == 0 {
+							s.numClients++
 
-						curr_client := &client{
-							connID:		 s.numClients,
-							address: 	 client_addr,
+							curr_client := &client{
+								connID:		 s.numClients,
+								address: 	 client_addr,
 
-							currWriteSN: 1,
-							expectedSN:	 1,
+								currWriteSN: 1,
+								expectedSN:	 1,
 
-							closeCh:	 make(chan int),
-							isClosed:	 false,
+								closeCh:	 make(chan int),
+								isClosed:	 false,
 
-							numEpochs: 	0,
+								numEpochs: 	0,
+							}
 						}
 
 						ackMsg := NewAck(curr_client.connID, 0)
@@ -254,7 +256,7 @@ func (s *server) clientHandler(clientID int) {
 				ackMsg := NewAck(clientID, 0)
 				s.sendMessage(ackMsg)
 			}
-		
+
 			// For each data message that has been sent but not yet acknowledged,
 			// resend the data message
 			for _, value := range s.clients[clientID].dataWindow {

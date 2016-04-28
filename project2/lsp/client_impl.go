@@ -76,7 +76,7 @@ func NewClient(hostport string, params *Params) (Client, error) {
 		windowSize: 	params.WindowSize,
 		epochMilli: 	params.EpochMillis,
 		epochLimit: 	params.EpochLimit,
-		verbose: 		true,
+		verbose: 		false,
 	}
 
 	serverAddr, resolve_err := lspnet.ResolveUDPAddr("udp", hostport)

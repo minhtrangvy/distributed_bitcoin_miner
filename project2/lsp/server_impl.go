@@ -51,7 +51,7 @@ func NewServer(port int, params *Params) (Server, error) {
 		windowSize: 	params.WindowSize,
 		epochMilli: 	params.EpochMillis,
 		epochLimit: 	params.EpochLimit,
-		verbose:		true,
+		verbose:		false,
 	}
 
 	// desiredAddr := lspnet.JoinHostPort("localhost", strconv.Itoa(port))

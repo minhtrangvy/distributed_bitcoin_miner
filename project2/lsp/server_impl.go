@@ -75,7 +75,7 @@ func (s *server) Read() (int, []byte, error) {
 	select {
 	// Connection to some client has been explicitly closed
 	case <- s.closeCh:
-		return 0, nil, errors.New("Channel has been closed")
+		return 0, nil, errors.New("Server has been closed")
 	// Connection has been lost due to an epoch timeout and no other
 
 
@@ -116,8 +116,8 @@ func (s *server) read() {
 					fmt.Println("Server side read() choseCh: closing the server'")
 				}
 				// Loop through all clients and tell them to close
-				for _, client := range s.clients {
-					client.closeCh <- 1
+				for key, _ := range s.clients {
+					s.clients[key].closeCh <- 1
 				}
 
 				if s.verbose {
@@ -203,7 +203,10 @@ func (s *server) read() {
 
 				// Otherwise, put it into the read channel
 				} else {
-					s.clients[received_msg.ConnID].readCh <- &received_msg
+					currentSN := received_msg.ConnID
+					if _, ok := s.clients[currentSN]; ok {
+						s.clients[currentSN].readCh <- &received_msg
+					}
 				}
 		}
 	}
@@ -217,6 +220,18 @@ func (s *server) clientHandler(clientID int) {
 	s.clients[clientID].epochCh = time.NewTicker(time.Duration(s.epochMilli) * time.Millisecond).C
 	for {
 		select {
+		// TODO: This could be bad
+		// When the client receives something in its close channel, close the client.
+		case <- s.clients[clientID].closeCh:
+			s.clients[clientID].Close()
+			delete(s.clientsAddr, s.clients[clientID].address)
+			delete(s.clients, clientID)
+			if s.verbose {
+				fmt.Println("Server side clientHandler: Client handler removing a message from closeCh")
+				// fmt.Printf("Length of readCh of client to close: %d\n", len(s.clients[clientID].readCh))
+				// fmt.Printf("Length of writeCh of client to close: %d\n", len(s.clients[clientID].writeCh))
+			}
+			return
 		case msg := <- s.clients[clientID].readCh:
 			if s.verbose {
 				fmt.Println("Server side clientHandler readCh: Client handler removing a message from readCh")
@@ -371,17 +386,6 @@ func (s *server) clientHandler(clientID int) {
 				}
 				s.clients[clientID].numEpochs++
 			}
-
-		// TODO: This could be bad
-		// When the client receives something in its close channel, close the client.
-		case <- s.clients[clientID].closeCh:
-			if s.verbose {
-				fmt.Println("Server side clientHandler: Client handler removing a message from closeCh")
-			}
-			s.clients[clientID].Close()
-
-			delete(s.clientsAddr, s.clients[clientID].address)
-			delete(s.clients, clientID)
 		}
 	}
 }

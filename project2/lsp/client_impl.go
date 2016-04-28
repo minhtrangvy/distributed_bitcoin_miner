@@ -58,7 +58,7 @@ func NewClient(hostport string, params *Params) (Client, error) {
 		connID:			0,
 		currWriteSN: 	1,
 		lowestUnackSN: 	0,
-		expectedSN: 	0,							// SN we expect to receive next
+		expectedSN: 	1,							// SN we expect to receive next
 
 		connectCh:		make(chan *Message, CHANNEL_SIZE),
 		readCh:			make(chan *Message, CHANNEL_SIZE), 		// data messages to be printed
@@ -153,6 +153,9 @@ func (c *client) Write(payload []byte) error {
 }
 
 func (c *client) Close() error {
+	if c.verbose {
+		fmt.Println("Client side Close(): Client's Close() API method was called")
+	}
 	c.isClosed = true			// TODO: Do we need a channel as opposed to a bool?
 	return nil
 }
@@ -209,10 +212,13 @@ func (c *client) master() {
 			case MsgData:
 				if c.verbose {
 					fmt.Printf("Client side master(): Client received MsgData and data is %s\n", string(msg.Payload))
+					fmt.Printf("Client side master(): Client has received the message it expects. CurrentSN is %d and expectedSN is %d\n", currentSN, c.expectedSN)
 				}
 				// Drop any message that isn't the expectedSN
 				if (currentSN == c.expectedSN) {
-					fmt.Printf("Client side master(): Client has received the message it expects. CurrentSN is %d and expectedSN is %d\n", currentSN, c.expectedSN)
+					if c.verbose {
+						fmt.Printf("Client side master(): got a data message and it's the expectedSn\n")
+					}
 					c.intermedReadCh <- msg
 					c.expectedSN++
 					c.numEpochs = 0
@@ -272,6 +278,9 @@ func (c *client) read() {
 	for {
 		select {
 			case <- c.closeCh:
+				if c.verbose {
+					fmt.Printf("Client side read(): closeCh has something\n")
+				}
 				c.closeCh <- 1 					// very hacky: we are putting it back in order to close the other go routines
 				return
 			default:
@@ -297,14 +306,22 @@ func (c *client) read() {
 }
 
 func (c *client) epoch() {
+	c.epochCh = time.NewTicker(time.Duration(c.epochMilli) * time.Millisecond).C
+
 	for {
 		select {
 		case <- c.closeCh:
+			if c.verbose {
+				fmt.Printf("Client side epoch(): closeCh has something\n")
+			}
 			c.closeCh <- 1
 			return
 		default:
+			// if c.verbose {
+			// 	fmt.Printf("Client side epoch(): putting ticker \n")
+			// }
 			// Once an epoch has been reached, epochCh is notified
-			c.epochCh = time.NewTicker(time.Duration(c.epochMilli) * time.Millisecond).C
+			// c.epochCh = time.NewTicker(time.Duration(c.epochMilli) * time.Millisecond).C
 		}
 	}
 }
@@ -322,14 +339,23 @@ func (c *client) findNewMin(currentMap map[int]*Message) int {
 }
 
 func (c *client) epochHelper() {
+	if c.verbose {
+		fmt.Printf("Client side epochHelper: WE ARE IN EPOCHHELPER")
+	}
 	// If client's connection request hasn't been acknowledged,
 	// resent the connection request
 	if (c.connID <= 0) {
+		if c.verbose {
+			fmt.Printf("Client side epochHelper: c.connID is less than or equal to 0")
+		}
+
 		if c.numEpochs < c.epochLimit {
+			if c.verbose {
+				fmt.Printf("Client side epochHelper: we are trying to send another connect message")
+			}
 			connectMsg := NewConnect()
 			connectMsg.ConnID = 0
 			connectMsg.SeqNum = 0
-
 			c.sendMessage(connectMsg)
 		} else {
 			c.Close()
@@ -342,6 +368,10 @@ func (c *client) epochHelper() {
 	// messages have been received, then send an acknowledgement with
 	// seqence number 0
 	if c.expectedSN == 0 {
+		if c.verbose {
+			fmt.Printf("Client side epochHelper: c.expectedSN == 0")
+		}
+
 		ackMsg := NewAck(c.connID, 0)
 		c.sendMessage(ackMsg)
 
@@ -352,12 +382,18 @@ func (c *client) epochHelper() {
 	// For each data message that has been sent but not yet acknowledged,
 	// resend the data message
 	for _, value := range c.dataWindow {
+		if c.verbose {
+			fmt.Printf("Client side epochHelper: we are resending data from dataWindow for SN %d\n", value)
+		}
 		c.sendMessage(value)
 	}
 
 	// Resend an acknowledgement message for each of the last w (or fewer)
 	// distinct data messages that have been received
 	for _, value := range c.ackWindow {
+		if c.verbose {
+			fmt.Printf("Client side epochHelper: we are resending acks from ackWindow for SN %d\n", value.SeqNum)
+		}
 		c.sendMessage(value)
 	}
 

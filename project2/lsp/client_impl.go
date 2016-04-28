@@ -76,7 +76,7 @@ func NewClient(hostport string, params *Params) (Client, error) {
 		windowSize: 	params.WindowSize,
 		epochMilli: 	params.EpochMillis,
 		epochLimit: 	params.EpochLimit,
-		verbose: 		false,
+		verbose: 		true,
 	}
 
 	serverAddr, resolve_err := lspnet.ResolveUDPAddr("udp", hostport)
@@ -109,7 +109,11 @@ func NewClient(hostport string, params *Params) (Client, error) {
 	if connectAck == nil {
 		return nil, errors.New("Could not connect!")
 	} else {
+		if current_client.verbose {
+			fmt.Printf("Client side constructor: succeeded in getting a connect ack back! connID is %d\n", connectAck.ConnID)
+		}
 		current_client.connID = connectAck.ConnID
+		current_client.lowestUnackSN++
 		return current_client, nil
 	}
 }
@@ -120,28 +124,29 @@ func (c *client) ConnID() int {
 
 func (c *client) Read() ([]byte, error) {
 	if c.verbose {
-		fmt.Println("Client's Read() API method was called")
+		fmt.Println("Client side Read(): Client's Read() API method was called")
 	}
 	msg := <- c.intermedReadCh
 	if msg == nil {
-		fmt.Println("A nil message was pulled out of the intermedReadCh")
+		fmt.Println("Client side Read(): A nil message was pulled out of the intermedReadCh")
 		return nil, errors.New("")
 	}
 	if c.verbose {
-		fmt.Println("%s was read.", msg.Payload)
+		fmt.Println("Client side Read(): %s was read.", msg.Payload)
 	}
 	return msg.Payload, nil
 }
 
 func (c *client) Write(payload []byte) error {
 	if c.verbose {
-		fmt.Println("Client's Write() API method was called")
-		fmt.Printf("We are writing %s\n", string(payload))
+		fmt.Printf("Client side Write(): Client's Write() API method was called, we are writing %s with seqnum %d\n", string(payload), c.currWriteSN)
 	}
 	if (!c.isClosed) {
 		msg := NewData(c.connID, c.currWriteSN, payload)
 		c.writeCh <- msg
-		fmt.Printf("%d\n", len(c.writeCh))
+		if c.verbose {
+			fmt.Printf("Client side Write(): writeCh is length %d\n", len(c.writeCh))
+		}
 		c.currWriteSN++
 	}
 	return nil
@@ -158,26 +163,26 @@ func (c *client) master() {
 	// We want to exit this for loop once all pending messages to the server
 	// have been sent and acknowledged.
 	if c.verbose {
-		fmt.Println("master is running")
+		fmt.Println("Client side master(): is running")
 	}
 	for {
 		select {
 		// Check to see if Close() has been called
 		case <- c.closeCh:
 			if c.verbose {
-				fmt.Println("Client is in closeCh")
+				fmt.Println("Client side master(): Client is in closeCh")
 			}
 			c.closeCh <- 1
 			return
 		case msg := <- c.readCh:
 			if c.verbose {
-				fmt.Println("Client is in readCh")
+				fmt.Println("Client side master(): Client is in readCh")
 			}
 			currentSN := msg.SeqNum
 			switch msg.Type {
 			case MsgAck:
 				if c.verbose {
-					fmt.Println("Client received MsgAck")
+					fmt.Printf("Client side master(): Client received MsgAck w/ seqnum %d\n", currentSN)
 				}
 				// If this is a acknowledgement for a connection request
 				if currentSN == 0 {
@@ -203,12 +208,11 @@ func (c *client) master() {
 				}
 			case MsgData:
 				if c.verbose {
-					fmt.Println("Client received MsgData")
-					fmt.Printf("Data is: %s\n", string(msg.Payload))
+					fmt.Printf("Client side master(): Client received MsgData and data is %s\n", string(msg.Payload))
 				}
 				// Drop any message that isn't the expectedSN
 				if (currentSN == c.expectedSN) {
-					fmt.Println("Client has received the message it expects")
+					fmt.Printf("Client side master(): Client has received the message it expects. CurrentSN is %d and expectedSN is %d\n", currentSN, c.expectedSN)
 					c.intermedReadCh <- msg
 					c.expectedSN++
 					c.numEpochs = 0
@@ -224,30 +228,29 @@ func (c *client) master() {
 
 		case msg := <- c.writeCh:
 			if c.verbose {
-				fmt.Println("Client is in writeCh")
+				fmt.Println("Client side master(): Client is in writeCh")
 			}
 			msgSent := false
 			// If message cannot be sent, then keep trying until it is sent
 			for (!msgSent) {
 				// Check if we can write the message based on SN
 				if c.verbose {
-					fmt.Println("trying to send msg in writeCh")
+					fmt.Printf("Client side master(): trying to send msg in writeCh with seqnum %d\n", msg.SeqNum)
 				}
-				if (c.lowestUnackSN <= msg.SeqNum && msg.SeqNum <= c.lowestUnackSN + c.windowSize) {
+				if (c.lowestUnackSN <= msg.SeqNum && msg.SeqNum <= c.lowestUnackSN + c.windowSize && len(c.dataWindow) < c.windowSize) {
 					if c.verbose {
-						fmt.Printf("seq num is %d and lowerunackSN is %d\n", msg.SeqNum,c.lowestUnackSN)
+						fmt.Printf("Client side master(): seq num is %d and lowestunackSN is %d\n", msg.SeqNum,c.lowestUnackSN)
 					}
 					// c.sendMessage(msg)
 					m_msg, marshal_err := json.Marshal(msg)
 					c.PrintError(marshal_err)
 					_, write_msg_err := c.connection.Write(m_msg)
 					if write_msg_err != nil {
-						fmt.Println("poop")
 						fmt.Fprintf(os.Stderr, "Client failed to write to the server. Exit code 1.", write_msg_err)
 						os.Exit(1)
 					}
 					if c.verbose {
-						fmt.Printf("just sent the msg to the server")
+						fmt.Printf("Client side master(): just sent the msg to the server\n")
 					}
 					msgSent = true
 
@@ -258,7 +261,7 @@ func (c *client) master() {
 
 		case <- c.epochCh:
 			if c.verbose {
-				fmt.Println("Client is in epochCh")
+				fmt.Println("Client side master(): Client is in epochCh")
 			}
 			c.epochHelper()
 		}
@@ -272,6 +275,9 @@ func (c *client) read() {
 				c.closeCh <- 1 					// very hacky: we are putting it back in order to close the other go routines
 				return
 			default:
+				if c.verbose {
+					fmt.Printf("Client side read(): read in a message\n")
+				}
 				buff := make([]byte, 1500)
 				num_bytes_received, _, received_err := c.connection.ReadFromUDP(buff[0:])
 				if received_err != nil {
@@ -283,7 +289,7 @@ func (c *client) read() {
 				unmarshal_err := json.Unmarshal(buff[0:num_bytes_received], &received_msg)
 				c.PrintError(unmarshal_err)
 				if c.verbose {
-					fmt.Printf("Sequence number of message being put into readCh is: %d\n", received_msg.SeqNum)
+					fmt.Printf("Client side read(): Sequence number of message being put into readCh is: %d\n", received_msg.SeqNum)
 				}
 				c.readCh <- &received_msg
 		}

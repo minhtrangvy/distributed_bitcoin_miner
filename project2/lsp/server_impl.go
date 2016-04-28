@@ -51,7 +51,7 @@ func NewServer(port int, params *Params) (Server, error) {
 		windowSize: 	params.WindowSize,
 		epochMilli: 	params.EpochMillis,
 		epochLimit: 	params.EpochLimit,
-		verbose:		false,
+		verbose:		true,
 	}
 
 	// desiredAddr := lspnet.JoinHostPort("localhost", strconv.Itoa(port))
@@ -87,7 +87,9 @@ func (s *server) Read() (int, []byte, error) {
 }
 
 func (s *server) Write(connID int, payload []byte) error {
-	fmt.Printf("For connID %d, the current write SN is %d\n", connID, s.clients[connID].currWriteSN)
+	if s.verbose {
+		fmt.Printf("Server side Write(): For connID %d, the current write SN is %d\n", connID, s.clients[connID].currWriteSN)
+	}
 	msg := NewData(connID, s.clients[connID].currWriteSN, payload)
 	s.clients[connID].writeCh <- msg
 	s.clients[connID].currWriteSN++
@@ -111,7 +113,7 @@ func (s *server) read() {
 		select {
 			case <- s.closeCh:
 				if s.verbose {
-					fmt.Println("we are in read()'s choseCh case, closing the server'")
+					fmt.Println("Server side read() choseCh: closing the server'")
 				}
 				// Loop through all clients and tell them to close
 				for _, client := range s.clients {
@@ -119,7 +121,7 @@ func (s *server) read() {
 				}
 
 				if s.verbose {
-					fmt.Println("put a 1 in each client's closeCh")
+					fmt.Println("Server side read() closeCh: put a 1 in each client's closeCh")
 				}
 
 				s.closeCh <- 1 					// very hacky: we are putting it back in order to close the other go routines
@@ -143,8 +145,7 @@ func (s *server) read() {
 				s.PrintError(unmarshal_err)
 
 				if s.verbose {
-					fmt.Fprintf(os.Stderr, "server received %s\n", string(received_msg.Payload))
-					fmt.Fprintf(os.Stderr, "server received message of type %d\n", received_msg.Type)
+					fmt.Fprintf(os.Stderr, "Server side read() default: server received message of type %d with payload: %s and seqnum %d\n", received_msg.Type, string(received_msg.Payload), received_msg.SeqNum)
 				}
 
 				// If the message type is Connect, deal with it here
@@ -152,7 +153,7 @@ func (s *server) read() {
 					if _, ok := s.clientsAddr[client_addr]; !ok {
 						if received_msg.SeqNum == 0 {
 							if s.verbose {
-								fmt.Println("It was a connect message and didn't exist yet")
+								fmt.Println("Server side read() default: It was a connect message and didn't exist yet")
 							}
 							s.numClients++
 
@@ -184,12 +185,12 @@ func (s *server) read() {
 								s.clients[curr_client.connID].closeCh <- 1				// Failed to write, connection lost
 
 								if s.verbose {
-									fmt.Printf("Current client ID is %d\n", curr_client.connID)
-									fmt.Fprintf(os.Stderr, "Server failed to write to the client. Exit code 1.", write_err)
+									fmt.Printf("Server side read() default: Current client ID is %d\n", curr_client.connID)
+									fmt.Fprintf(os.Stderr, "Server side read() default: Server failed to write to the client. Exit code 1.", write_err)
 								}
 							}
 							if s.verbose {
-								fmt.Println("sent connection ack back to client")
+								fmt.Println("Server side read() default: sent connection ack back to client")
 							}
 
 							s.clientsAddr[client_addr] = curr_client.connID
@@ -210,7 +211,7 @@ func (s *server) read() {
 
 func (s *server) clientHandler(clientID int) {
 	if s.verbose {
-		fmt.Printf("Client handler started for clientID %d\n", clientID)
+		fmt.Printf("Server side clientHandler: Client handler started for clientID %d\n", clientID)
 	}
 
 	s.clients[clientID].epochCh = time.NewTicker(time.Duration(s.epochMilli) * time.Millisecond).C
@@ -218,14 +219,14 @@ func (s *server) clientHandler(clientID int) {
 		select {
 		case msg := <- s.clients[clientID].readCh:
 			if s.verbose {
-				fmt.Println("Client handler removing a message from readCh")
+				fmt.Println("Server side clientHandler readCh: Client handler removing a message from readCh")
 			}
 			currentSN := msg.SeqNum
 			// TODO: is clientID and msg.ConnID the same?
 			switch msg.Type {
 			case MsgAck:
 				if s.verbose {
-					fmt.Println("In case MsgAck")
+					fmt.Println("Server side clientHandler: In case MsgAck")
 				}
 
 				if _, ok := s.clients[clientID].dataWindow[currentSN]; ok {
@@ -256,20 +257,20 @@ func (s *server) clientHandler(clientID int) {
 				}
 			case MsgData:
 				if s.verbose {
-					fmt.Println("In case MsgData")
+					fmt.Println("Server side clientHandler: In case MsgData")
 				}
 				// Drop any message that isn't the expectedSN
 				s.clients[clientID].numEpochs = 0
 				if (currentSN == s.clients[clientID].expectedSN) {
 					if s.verbose {
-						fmt.Println("This is the message we're expecting")
+						fmt.Println("Server side clientHandler: This is the message we're expecting")
 					}
 
 					s.intermedReadCh <- msg
 					s.clients[clientID].expectedSN++
 
 					if s.verbose {
-						fmt.Println("Received a data message of the expectedSN, sending ack back.")
+						fmt.Println("Server side clientHandler: Received a data message of the expectedSN, sending ack back.")
 					}
 					ackMsg := NewAck(clientID, currentSN)
 					m_msg, marshal_err := json.Marshal(ackMsg)
@@ -288,7 +289,7 @@ func (s *server) clientHandler(clientID int) {
 			}
 		case msg := <- s.clients[clientID].writeCh:
 			if s.verbose {
-				fmt.Println("Client handler removing a message from writeCh")
+				fmt.Println("Server side clientHandler: Client handler removing a message from writeCh")
 			}
 
 			m_msg, marshal_err := json.Marshal(msg)
@@ -301,25 +302,27 @@ func (s *server) clientHandler(clientID int) {
 				s.clients[clientID].closeCh <- 1
 				fmt.Printf("Current client ID is %d\n", clientID)
 				fmt.Fprintf(os.Stderr, "Server failed to write to the client. Exit code 1.", write_err)
-			} else {
-				fmt.Println("Write was successful")
+			} else if s.verbose {
+				fmt.Println("Server side clientHandler: Write was successful")
 			}
 
 		// If an epoch happens for that client
 		case <- s.clients[clientID].epochCh:
 			if s.verbose {
-				fmt.Println("Client handler removing a message from epochCh")
+				fmt.Printf("Server side clientHandler epoch(): Client handler removing a message from epochCh and num epochs is %d\n", s.clients[clientID].numEpochs)
 			}
 
 			// If the numEpochs has reached the limit, we need to disconnect
 			// from the connection
 			if s.clients[clientID].numEpochs >= s.epochLimit {
 				s.clients[clientID].closeCh <- 1
-
 			} else {
 				// If no data messages have been received from the client, then resend an ack msg for
 				// 	the client's connection request
 				if s.clients[clientID].expectedSN == 1 {
+					if s.verbose {
+						fmt.Printf("Server side clientHandler epoch(): no data has been received\n")
+					}
 					ackMsg := NewAck(clientID, 0)
 					m_msg, marshal_err := json.Marshal(ackMsg)
 					s.PrintError(marshal_err)
@@ -334,6 +337,9 @@ func (s *server) clientHandler(clientID int) {
 				// For each data message that has been sent but not yet acknowledged,
 				// resend the data message
 				for _, value := range s.clients[clientID].dataWindow {
+					if s.verbose {
+						fmt.Printf("Server side clientHandler epoch(): sending all msgs in data window %s\n", string(value.Payload))
+					}
 					m_msg, marshal_err := json.Marshal(value)
 					s.PrintError(marshal_err)
 					_, write_err := s.connection.WriteToUDP(m_msg, s.clients[clientID].address)
@@ -347,6 +353,9 @@ func (s *server) clientHandler(clientID int) {
 				// Resend an acknowledgement message for each of the last w (or fewer)
 				// distinct data messages that have been received
 				for _, value := range s.clients[clientID].ackWindow {
+					if s.verbose {
+						fmt.Printf("Server side clientHandler epoch(): sending all msgs in ack window %d\n", value.SeqNum)
+					}
 					m_msg, marshal_err := json.Marshal(value)
 					s.PrintError(marshal_err)
 					_, write_err := s.connection.WriteToUDP(m_msg, s.clients[clientID].address)
@@ -357,6 +366,9 @@ func (s *server) clientHandler(clientID int) {
 					}
 				}
 
+				if s.verbose {
+					fmt.Printf("Server side clientHandler epoch(): epoch is done")
+				}
 				s.clients[clientID].numEpochs++
 			}
 
@@ -364,7 +376,7 @@ func (s *server) clientHandler(clientID int) {
 		// When the client receives something in its close channel, close the client.
 		case <- s.clients[clientID].closeCh:
 			if s.verbose {
-				fmt.Println("Client handler removing a message from closeCh")
+				fmt.Println("Server side clientHandler: Client handler removing a message from closeCh")
 			}
 			s.clients[clientID].Close()
 

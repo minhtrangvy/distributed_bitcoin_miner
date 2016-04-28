@@ -212,7 +212,7 @@ func (s *server) clientHandler(clientID int) {
 	if s.verbose {
 		fmt.Printf("Client handler started for clientID %d\n", clientID)
 	}
-	
+
 	s.clients[clientID].epochCh = time.NewTicker(time.Duration(s.epochMilli) * time.Millisecond).C
 	for {
 		select {
@@ -227,7 +227,7 @@ func (s *server) clientHandler(clientID int) {
 				if s.verbose {
 					fmt.Println("In case MsgAck")
 				}
-				
+
 				if _, ok := s.clients[clientID].dataWindow[currentSN]; ok {
 					delete(s.clients[clientID].dataWindow, currentSN)
 
@@ -264,7 +264,7 @@ func (s *server) clientHandler(clientID int) {
 					if s.verbose {
 						fmt.Println("This is the message we're expecting")
 					}
-					
+
 					s.intermedReadCh <- msg
 					s.clients[clientID].expectedSN++
 
@@ -290,7 +290,7 @@ func (s *server) clientHandler(clientID int) {
 			if s.verbose {
 				fmt.Println("Client handler removing a message from writeCh")
 			}
-			
+
 			m_msg, marshal_err := json.Marshal(msg)
 			s.PrintError(marshal_err)
 			_, write_err := s.connection.WriteToUDP(m_msg, s.clients[clientID].address)
@@ -310,7 +310,7 @@ func (s *server) clientHandler(clientID int) {
 			if s.verbose {
 				fmt.Println("Client handler removing a message from epochCh")
 			}
-			
+
 			// If the numEpochs has reached the limit, we need to disconnect
 			// from the connection
 			if s.clients[clientID].numEpochs >= s.epochLimit {
